@@ -17,9 +17,10 @@ import android.widget.Button;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
+import java.nio.ByteBuffer;
 import java.util.*;
 
-public class WelcomeActivity extends Activity
+public class WelcomeActivity extends Activity implements Runnable
 {
     private static final String TAG = "EarlyStageDetection";
     private static final String ACTION_USB_PERMISSION = "org.umn.jpwang.earlystagedetection.USB_PERMISSION";
@@ -33,7 +34,10 @@ public class WelcomeActivity extends Activity
     private UsbManager _usbManager;
     private BroadcastReceiver _usbReceiver;
     private PendingIntent _usbPermissionIntent;
+
     private UsbDevice _currentDevice = null;
+    private UsbDeviceConnection _connection;
+    private UsbEndpoint _endpointIntr;
 
     @Override
     public void onCreate(Bundle savedInstanceState)
@@ -97,22 +101,6 @@ public class WelcomeActivity extends Activity
         startActivity(Intent.createChooser(i, "Email Log with:"));
     }
 
-    /*private void testAppendingText()
-    {
-        Timer t = new Timer();
-        t.scheduleAtFixedRate(new TimerTask() {
-            @Override
-            public void run() {
-                runOnUiThread(new Runnable() {
-                    @Override
-                    public void run() {
-                        appendMessage((new Date()).toString());
-                    }
-                });
-            }
-        }, 1000, 1000);
-    }*/
-
     private void appendMessage(String message)
     {
         _outputString += message + "\n";
@@ -125,7 +113,10 @@ public class WelcomeActivity extends Activity
         if ( _currentDevice == null )
         {
             appendMessage("----------------------");
-            appendMessage("[" + (new Date()).toString() + "] Searching for USB devices...");
+            appendMessage("[" + (new Date()).toString() + "]");
+            appendMessage("----------------------");
+
+            appendMessage("Searching for USB devices...");
 
             // try to find a USB device to connect to
             HashMap<String, UsbDevice> deviceList = _usbManager.getDeviceList();
@@ -157,15 +148,21 @@ public class WelcomeActivity extends Activity
                 {
                     synchronized ( this )
                     {
+                        appendMessage("permission callback recieved!");
+
                         UsbDevice device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
                         if ( intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false) )
                         {
+                            appendMessage("permission granted");
+
                             if( device != null )
                                 setupDevice(device);
+                            else
+                                appendMessage("but the device was nil?");
                         }
                         else
                         {
-                            Log.d(TAG, "permission denied for device " + device);
+                            appendMessage("permission denied for device " + device);
                         }
                     }
                 }
@@ -202,6 +199,44 @@ public class WelcomeActivity extends Activity
     {
         _currentDevice = device;
         _startButton.setEnabled(true);
+
+        appendMessage("setupDevice " + device);
+        if (device.getInterfaceCount() != 1)
+        {
+            appendMessage("could not find interface");
+            return;
+        }
+
+        UsbInterface intf = device.getInterface(0);
+        // device should have one endpoint
+        if (intf.getEndpointCount() != 1)
+        {
+            appendMessage("could not find endpoint");
+            return;
+        }
+        // endpoint should be of type interrupt
+        UsbEndpoint ep = intf.getEndpoint(0);
+        if (ep.getType() != UsbConstants.USB_ENDPOINT_XFER_INT)
+        {
+            appendMessage("endpoint is not interrupt type");
+            return;
+        }
+        _endpointIntr = ep;
+
+        if ( device != null )
+        {
+            UsbDeviceConnection connection = _usbManager.openDevice(device);
+            if ( connection != null && connection.claimInterface(intf, true) )
+            {
+                appendMessage("open SUCCESS");
+                _connection = connection;
+            }
+            else
+            {
+                appendMessage("open FAIL");
+                _connection = null;
+            }
+        }
     }
 
     private void teardownDevice(UsbDevice device)
@@ -215,25 +250,50 @@ public class WelcomeActivity extends Activity
 
     private void sendConfigAndStartPackets()
     {
-        // connect
-        UsbInterface intf = _currentDevice.getInterface(0);
-        UsbEndpoint endpoint = intf.getEndpoint(0);
-        UsbDeviceConnection connection = _usbManager.openDevice(_currentDevice);
-        connection.claimInterface(intf, true);
+        // start up the thread that will wait for data
+        Thread thread = new Thread(this);
+        thread.start();
+    }
 
+    @Override
+    public void run()
+    {
         // config packet
+        appendMessage("Sending config packet...");
         Packet configPacket = new Packet(Packet.Type.Config);
-        byte[] buffer = configPacket.getBuffer();
-        connection.bulkTransfer(endpoint, buffer, buffer.length, 0);
+        byte[] buf = configPacket.getBuffer();
+        _connection.bulkTransfer(_endpointIntr, buf, buf.length, 0);
+
+        // wait 2 seconds?
+        try { Thread.sleep(2000); }
+        catch (InterruptedException e) { }
 
         // start packet
+        appendMessage("Sending start packet...");
         Packet startPacket = new Packet(Packet.Type.Start);
-        buffer = startPacket.getBuffer();
-        connection.bulkTransfer(endpoint, buffer, buffer.length, 0);
+        buf = startPacket.getBuffer();
+        _connection.bulkTransfer(_endpointIntr, buf, buf.length, 0);
 
-        // now listen to data coming down the wire
-        // TODO
+        // wait 2 seconds?
+        try { Thread.sleep(2000); }
+        catch (InterruptedException e) { }
 
-        connection.close();
+        ByteBuffer buffer = ByteBuffer.allocate(_endpointIntr.getMaxPacketSize());
+        UsbRequest request = new UsbRequest();
+        request.initialize(_connection, _endpointIntr);
+
+        while ( true )
+        {
+            // queue a IN request on the interrupt endpoint
+            request.queue(buffer, _endpointIntr.getMaxPacketSize());
+
+            // wait for it to complete
+            _connection.requestWait();
+
+            appendMessage("buffer received: " + buffer.toString());
+
+            try { Thread.sleep(100); }
+            catch (InterruptedException e) { }
+        }
     }
 }
