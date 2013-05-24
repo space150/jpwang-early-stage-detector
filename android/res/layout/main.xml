@@ -4,10 +4,28 @@
               android:layout_width="fill_parent"
               android:layout_height="fill_parent"
         >
-    <TextView
-            android:layout_width="fill_parent"
+
+    <Button
+            android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="Hello World, WelcomeActivity"
-            />
+            android:text="Send Config &amp; Start Packets"
+            android:id="@+id/start_button" android:layout_gravity="center_horizontal" android:enabled="false"/>
+    <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Output:"
+            android:id="@+id/textView" android:layout_gravity="center|left" android:singleLine="true"/>
+
+    <ScrollView android:layout_width="fill_parent"
+                android:layout_height="fill_parent"
+                android:layout_weight="1"
+                android:id="@+id/output_scrollview">
+        <TextView
+                android:layout_width="fill_parent"
+                android:layout_height="fill_parent"
+                android:text="..."
+                android:id="@+id/output_view"/>
+    </ScrollView>
+
 </LinearLayout>
 
