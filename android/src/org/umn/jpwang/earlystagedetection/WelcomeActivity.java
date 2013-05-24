@@ -36,10 +36,13 @@ public class WelcomeActivity extends Activity implements Runnable
     private PendingIntent _usbPermissionIntent;
 
     private UsbDevice _currentDevice = null;
-    private UsbDeviceConnection _connectionRead;
-    private UsbEndpoint _endpointIntrRead;
-    private UsbDeviceConnection _connectionWrite;
-    private UsbEndpoint _endpointIntrWrite;
+    private UsbDeviceConnection _connectionRead = null;
+    private UsbEndpoint _endpointIntrRead = null;
+    private UsbDeviceConnection _connectionWrite = null;
+    private UsbEndpoint _endpointIntrWrite = null;
+
+    private Thread _waitThread = null;
+    private boolean _stopWaitThread = false;
 
     @Override
     public void onCreate(Bundle savedInstanceState)
@@ -69,6 +72,17 @@ public class WelcomeActivity extends Activity implements Runnable
         super.onResume();
 
         findUsbDeviceAndConnect();
+    }
+
+    @Override
+    public void onDestroy()
+    {
+        super.onDestroy();
+
+        _stopWaitThread = true;
+
+        if ( _currentDevice != null )
+            teardownDevice(_currentDevice);
     }
 
     @Override
@@ -110,13 +124,25 @@ public class WelcomeActivity extends Activity implements Runnable
         _outputScrollView.fullScroll(ScrollView.FOCUS_DOWN);
     }
 
+    private void appendMessageOnUIThread(String message)
+    {
+        final String m = message;
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                appendMessage(m);
+            }
+        });
+    }
+
     private void findUsbDeviceAndConnect()
     {
         if ( _currentDevice == null )
         {
-            appendMessage("----------------------");
+            appendMessage("");
+            appendMessage("--------------------------------------------");
             appendMessage("[" + (new Date()).toString() + "]");
-            appendMessage("----------------------");
+            appendMessage("--------------------------------------------");
 
             appendMessage("Searching for USB devices...");
 
@@ -203,6 +229,7 @@ public class WelcomeActivity extends Activity implements Runnable
         _startButton.setEnabled(true);
 
         appendMessage("setupDevice " + device);
+        appendMessage("device has " + device.getInterfaceCount() + " interfaces available");
 
         UsbInterface usbInterfaceRead = null;
         UsbInterface usbInterfaceWrite = null;
@@ -220,6 +247,11 @@ public class WelcomeActivity extends Activity implements Runnable
                 ep1 = usbInterfaceRead.getEndpoint(0);
                 ep2 = usbInterfaceRead.getEndpoint(1);
             }
+            else
+            {
+                appendMessage("we are trying to use a single interface, but the interface does not have 2 endpoints to use!");
+                return;
+            }
         }
         else
         {
@@ -229,6 +261,11 @@ public class WelcomeActivity extends Activity implements Runnable
             {
                 ep1 = usbInterfaceRead.getEndpoint(0);
                 ep2 = usbInterfaceWrite.getEndpoint(0);
+            }
+            else
+            {
+                appendMessage("we are trying to using two interfaces, but the both interfaces do not have a endpoint to use!");
+                return;
             }
         }
 
@@ -282,7 +319,7 @@ public class WelcomeActivity extends Activity implements Runnable
             _connectionWrite.claimInterface(usbInterfaceWrite, true);
         }
 
-        appendMessage("device has been set up and connected");
+        appendMessage("device has been set up and connected, read: " + _endpointIntrRead.toString() + ", write: " + _endpointIntrWrite.toString());
     }
 
     private void teardownDevice(UsbDevice device)
@@ -292,7 +329,15 @@ public class WelcomeActivity extends Activity implements Runnable
             appendMessage("tearing down device");
 
             _connectionRead.close();
+            _connectionRead = null;
+
             _connectionWrite.close();
+            _connectionWrite = null;
+
+            _endpointIntrRead = null;
+            _endpointIntrWrite = null;
+
+            _stopWaitThread = true;
 
             _currentDevice = null;
             _startButton.setEnabled(false);
@@ -301,8 +346,8 @@ public class WelcomeActivity extends Activity implements Runnable
 
     private void sendConfigAndStartPackets()
     {
-        Thread thread = new Thread(this);
-        thread.start();
+        _waitThread = new Thread(this);
+        _waitThread.start();
     }
 
     @Override
@@ -313,6 +358,7 @@ public class WelcomeActivity extends Activity implements Runnable
 
         // config packet
         appendMessage("Sending config packet...");
+
         Packet configPacket = new Packet(Packet.Type.Config);
         byte[] cb = configPacket.getBuffer();
         ByteBuffer byteBuffer = ByteBuffer.allocate(cb.length);
@@ -357,7 +403,7 @@ public class WelcomeActivity extends Activity implements Runnable
         int maxPacketSize = _endpointIntrRead.getMaxPacketSize();
         ByteBuffer buffer = ByteBuffer.allocate(maxPacketSize);
 
-        while ( true )
+        while ( !_stopWaitThread )
         {
             appendMessage("requesting response from read endpoint");
 
@@ -372,5 +418,8 @@ public class WelcomeActivity extends Activity implements Runnable
             try { Thread.sleep(100); }
             catch (InterruptedException e) { }
         }
+
+        if ( _stopWaitThread )
+            appendMessage("wait thread stopping!");
     }
 }
