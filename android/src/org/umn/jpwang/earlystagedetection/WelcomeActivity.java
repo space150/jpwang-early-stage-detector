@@ -36,8 +36,10 @@ public class WelcomeActivity extends Activity implements Runnable
     private PendingIntent _usbPermissionIntent;
 
     private UsbDevice _currentDevice = null;
-    private UsbDeviceConnection _connection;
-    private UsbEndpoint _endpointIntr;
+    private UsbDeviceConnection _connectionRead;
+    private UsbEndpoint _endpointIntrRead;
+    private UsbDeviceConnection _connectionWrite;
+    private UsbEndpoint _endpointIntrWrite;
 
     @Override
     public void onCreate(Bundle savedInstanceState)
@@ -201,48 +203,97 @@ public class WelcomeActivity extends Activity implements Runnable
         _startButton.setEnabled(true);
 
         appendMessage("setupDevice " + device);
-        if (device.getInterfaceCount() != 1)
+
+        UsbInterface usbInterfaceRead = null;
+        UsbInterface usbInterfaceWrite = null;
+        UsbEndpoint ep1 = null;
+        UsbEndpoint ep2 = null;
+        boolean usingSingleInterface = false;
+
+        if ( usingSingleInterface )
         {
-            appendMessage("could not find interface");
+            // Using the same interface for reading and writing
+            usbInterfaceRead = device.getInterface(0x00);
+            usbInterfaceWrite = usbInterfaceRead;
+            if (usbInterfaceRead.getEndpointCount() == 2)
+            {
+                ep1 = usbInterfaceRead.getEndpoint(0);
+                ep2 = usbInterfaceRead.getEndpoint(1);
+            }
+        }
+        else
+        {
+            usbInterfaceRead = device.getInterface(0x00);
+            usbInterfaceWrite = device.getInterface(0x01);
+            if ((usbInterfaceRead.getEndpointCount() == 1) && (usbInterfaceWrite.getEndpointCount() == 1))
+            {
+                ep1 = usbInterfaceRead.getEndpoint(0);
+                ep2 = usbInterfaceWrite.getEndpoint(0);
+            }
+        }
+
+
+        if ((ep1 == null) || (ep2 == null))
+        {
+            appendMessage("Endpoint 1 or 2 is NULL!");
             return;
         }
 
-        UsbInterface intf = device.getInterface(0);
-        // device should have one endpoint
-        if (intf.getEndpointCount() != 1)
-        {
-            appendMessage("could not find endpoint");
-            return;
-        }
-        // endpoint should be of type interrupt
-        UsbEndpoint ep = intf.getEndpoint(0);
-        if (ep.getType() != UsbConstants.USB_ENDPOINT_XFER_INT)
-        {
-            appendMessage("endpoint is not interrupt type");
-            return;
-        }
-        _endpointIntr = ep;
+        // Determine which endpoint is the read, and which is the write
 
-        if ( device != null )
+        if (ep1.getType() == UsbConstants.USB_ENDPOINT_XFER_INT)
         {
-            UsbDeviceConnection connection = _usbManager.openDevice(device);
-            if ( connection != null && connection.claimInterface(intf, true) )
+            if (ep1.getDirection() == UsbConstants.USB_DIR_IN)
             {
-                appendMessage("open SUCCESS");
-                _connection = connection;
+                _endpointIntrRead = ep1;
             }
-            else
+            else if (ep1.getDirection() == UsbConstants.USB_DIR_OUT)
             {
-                appendMessage("open FAIL");
-                _connection = null;
+                _endpointIntrWrite = ep1;
             }
         }
+        if (ep2.getType() == UsbConstants.USB_ENDPOINT_XFER_INT)
+        {
+            if (ep2.getDirection() == UsbConstants.USB_DIR_IN)
+            {
+                _endpointIntrRead = ep2;
+            }
+            else if (ep2.getDirection() == UsbConstants.USB_DIR_OUT)
+            {
+                _endpointIntrWrite = ep2;
+            }
+        }
+        if ((_endpointIntrRead == null) || (_endpointIntrWrite == null))
+        {
+            appendMessage("Unable to get read or write end point!");
+            return;
+        }
+
+        _connectionRead = _usbManager.openDevice(device);
+        _connectionRead.claimInterface(usbInterfaceRead, true);
+
+        if ( usingSingleInterface )
+        {
+            _connectionWrite = _connectionRead;
+        }
+        else
+        {
+            _connectionWrite = _usbManager.openDevice(device);
+            _connectionWrite.claimInterface(usbInterfaceWrite, true);
+        }
+
+        appendMessage("device has been set up and connected");
     }
 
     private void teardownDevice(UsbDevice device)
     {
         if ( device == _currentDevice )
         {
+            appendMessage("tearing down device");
+
+            _connectionRead.close();
+            _connectionWrite.close();
+
             _currentDevice = null;
             _startButton.setEnabled(false);
         }
@@ -250,7 +301,6 @@ public class WelcomeActivity extends Activity implements Runnable
 
     private void sendConfigAndStartPackets()
     {
-        // start up the thread that will wait for data
         Thread thread = new Thread(this);
         thread.start();
     }
@@ -258,37 +308,64 @@ public class WelcomeActivity extends Activity implements Runnable
     @Override
     public void run()
     {
+        UsbRequest request = new UsbRequest();
+        request.initialize(_connectionWrite, _endpointIntrWrite);
+
         // config packet
         appendMessage("Sending config packet...");
         Packet configPacket = new Packet(Packet.Type.Config);
-        byte[] buf = configPacket.getBuffer();
-        _connection.bulkTransfer(_endpointIntr, buf, buf.length, 0);
+        byte[] cb = configPacket.getBuffer();
+        ByteBuffer byteBuffer = ByteBuffer.allocate(cb.length);
+        byteBuffer.put(cb, 0, cb.length);
+
+        // queue a OUT request
+        boolean response = request.queue(byteBuffer, byteBuffer.capacity());
+        if (_connectionWrite.requestWait() == request)
+            appendMessage("sent config packet, queue response: " + response);
+        else
+            appendMessage("requestWait() failed, queue response: " + response);
+
 
         // wait 2 seconds?
         try { Thread.sleep(2000); }
         catch (InterruptedException e) { }
+
 
         // start packet
         appendMessage("Sending start packet...");
         Packet startPacket = new Packet(Packet.Type.Start);
-        buf = startPacket.getBuffer();
-        _connection.bulkTransfer(_endpointIntr, buf, buf.length, 0);
+        byte[] sb = startPacket.getBuffer();
+        byteBuffer = ByteBuffer.allocate(sb.length);
+        byteBuffer.put(sb, 0, sb.length);
+
+        // queue a OUT request
+        response = request.queue(byteBuffer, byteBuffer.capacity());
+        if (_connectionWrite.requestWait() == request)
+            appendMessage("sent start packet, queue response: " + response);
+        else
+            appendMessage("requestWait() failed, queue response: " + response);
+
 
         // wait 2 seconds?
         try { Thread.sleep(2000); }
         catch (InterruptedException e) { }
 
-        ByteBuffer buffer = ByteBuffer.allocate(_endpointIntr.getMaxPacketSize());
-        UsbRequest request = new UsbRequest();
-        request.initialize(_connection, _endpointIntr);
+
+        UsbRequest readRequest = new UsbRequest();
+        readRequest.initialize(_connectionRead, _endpointIntrRead);
+
+        int maxPacketSize = _endpointIntrRead.getMaxPacketSize();
+        ByteBuffer buffer = ByteBuffer.allocate(maxPacketSize);
 
         while ( true )
         {
+            appendMessage("requesting response from read endpoint");
+
             // queue a IN request on the interrupt endpoint
-            request.queue(buffer, _endpointIntr.getMaxPacketSize());
+            readRequest.queue(buffer, maxPacketSize);
 
             // wait for it to complete
-            _connection.requestWait();
+            _connectionRead.requestWait();
 
             appendMessage("buffer received: " + buffer.toString());
 
