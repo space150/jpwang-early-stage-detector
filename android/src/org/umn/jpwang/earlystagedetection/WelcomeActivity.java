@@ -119,6 +119,7 @@ public class WelcomeActivity extends Activity implements Runnable
 
     private void appendMessage(String message)
     {
+        Log.d(TAG, message);
         _outputString += message + "\n";
         _outputView.setText(_outputString);
         _outputScrollView.fullScroll(ScrollView.FOCUS_DOWN);
@@ -217,7 +218,8 @@ public class WelcomeActivity extends Activity implements Runnable
 
         _usbPermissionIntent = PendingIntent.getBroadcast(this, 0, new Intent(ACTION_USB_PERMISSION), 0);
 
-        IntentFilter filter = new IntentFilter(ACTION_USB_PERMISSION);
+        IntentFilter filter = new IntentFilter();
+        filter.addAction(ACTION_USB_PERMISSION);
         filter.addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED);
         filter.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED);
         registerReceiver(_usbReceiver, filter);
@@ -231,11 +233,23 @@ public class WelcomeActivity extends Activity implements Runnable
         appendMessage("setupDevice " + device);
         appendMessage("device has " + device.getInterfaceCount() + " interfaces available");
 
+        if ( device.getInterfaceCount() == 0 )
+        {
+            appendMessage("device has no interfaces! exiting...");
+            return;
+        }
+
         UsbInterface usbInterfaceRead = null;
         UsbInterface usbInterfaceWrite = null;
         UsbEndpoint ep1 = null;
         UsbEndpoint ep2 = null;
         boolean usingSingleInterface = false;
+
+        if ( device.getInterfaceCount() < 2 )
+        {
+            appendMessage("Attempting to use a single interface for both INPUT and OUTPUT");
+            usingSingleInterface = true;
+        }
 
         if ( usingSingleInterface )
         {
@@ -246,6 +260,8 @@ public class WelcomeActivity extends Activity implements Runnable
             {
                 ep1 = usbInterfaceRead.getEndpoint(0);
                 ep2 = usbInterfaceRead.getEndpoint(1);
+
+                appendMessage("assigned read interface to ep1 and write interface to ep2");
             }
             else
             {
@@ -261,6 +277,8 @@ public class WelcomeActivity extends Activity implements Runnable
             {
                 ep1 = usbInterfaceRead.getEndpoint(0);
                 ep2 = usbInterfaceWrite.getEndpoint(0);
+
+                appendMessage("assigned read interface to ep1 and write interface to ep2");
             }
             else
             {
@@ -277,8 +295,25 @@ public class WelcomeActivity extends Activity implements Runnable
         }
 
         // Determine which endpoint is the read, and which is the write
+        if ( ep1.getType() == UsbConstants.USB_ENDPOINT_XFER_INT )
+        {
+            appendMessage("ep1 is of type USB_ENDPOINT_XFER_INT");
+        }
+        else if ( ep1.getType() == UsbConstants.USB_ENDPOINT_XFER_BULK )
+        {
+            appendMessage("ep1 is of type USB_ENDPOINT_XFER_BULK");
+        }
 
-        if (ep1.getType() == UsbConstants.USB_ENDPOINT_XFER_INT)
+        if ( ep2.getType() == UsbConstants.USB_ENDPOINT_XFER_INT )
+        {
+            appendMessage("ep2 is of type USB_ENDPOINT_XFER_INT");
+        }
+        else if ( ep2.getType() == UsbConstants.USB_ENDPOINT_XFER_BULK )
+        {
+            appendMessage("ep2 is of type USB_ENDPOINT_XFER_BULK");
+        }
+
+        if ( ep1.getType() == UsbConstants.USB_ENDPOINT_XFER_INT || ep1.getType() == UsbConstants.USB_ENDPOINT_XFER_BULK )
         {
             if (ep1.getDirection() == UsbConstants.USB_DIR_IN)
             {
@@ -289,7 +324,7 @@ public class WelcomeActivity extends Activity implements Runnable
                 _endpointIntrWrite = ep1;
             }
         }
-        if (ep2.getType() == UsbConstants.USB_ENDPOINT_XFER_INT)
+        if ( ep2.getType() == UsbConstants.USB_ENDPOINT_XFER_INT || ep2.getType() == UsbConstants.USB_ENDPOINT_XFER_BULK )
         {
             if (ep2.getDirection() == UsbConstants.USB_DIR_IN)
             {
@@ -346,6 +381,8 @@ public class WelcomeActivity extends Activity implements Runnable
 
     private void sendConfigAndStartPackets()
     {
+        _stopWaitThread = false;
+
         _waitThread = new Thread(this);
         _waitThread.start();
     }
@@ -357,7 +394,7 @@ public class WelcomeActivity extends Activity implements Runnable
         request.initialize(_connectionWrite, _endpointIntrWrite);
 
         // config packet
-        appendMessage("Sending config packet...");
+        appendMessageOnUIThread("Sending config packet...");
 
         Packet configPacket = new Packet(Packet.Type.Config);
         byte[] cb = configPacket.getBuffer();
@@ -367,9 +404,9 @@ public class WelcomeActivity extends Activity implements Runnable
         // queue a OUT request
         boolean response = request.queue(byteBuffer, byteBuffer.capacity());
         if (_connectionWrite.requestWait() == request)
-            appendMessage("sent config packet, queue response: " + response);
+            appendMessageOnUIThread("sent config packet, queue response: " + response);
         else
-            appendMessage("requestWait() failed, queue response: " + response);
+            appendMessageOnUIThread("requestWait() failed, queue response: " + response);
 
 
         // wait 2 seconds?
@@ -378,7 +415,7 @@ public class WelcomeActivity extends Activity implements Runnable
 
 
         // start packet
-        appendMessage("Sending start packet...");
+        appendMessageOnUIThread("Sending start packet...");
         Packet startPacket = new Packet(Packet.Type.Start);
         byte[] sb = startPacket.getBuffer();
         byteBuffer = ByteBuffer.allocate(sb.length);
@@ -387,9 +424,9 @@ public class WelcomeActivity extends Activity implements Runnable
         // queue a OUT request
         response = request.queue(byteBuffer, byteBuffer.capacity());
         if (_connectionWrite.requestWait() == request)
-            appendMessage("sent start packet, queue response: " + response);
+            appendMessageOnUIThread("sent start packet, queue response: " + response);
         else
-            appendMessage("requestWait() failed, queue response: " + response);
+            appendMessageOnUIThread("requestWait() failed, queue response: " + response);
 
 
         // wait 2 seconds?
@@ -405,7 +442,7 @@ public class WelcomeActivity extends Activity implements Runnable
 
         while ( !_stopWaitThread )
         {
-            appendMessage("requesting response from read endpoint");
+            appendMessageOnUIThread("requesting response from read endpoint");
 
             // queue a IN request on the interrupt endpoint
             readRequest.queue(buffer, maxPacketSize);
@@ -413,13 +450,13 @@ public class WelcomeActivity extends Activity implements Runnable
             // wait for it to complete
             _connectionRead.requestWait();
 
-            appendMessage("buffer received: " + buffer.toString());
+            appendMessageOnUIThread("buffer received: " + buffer.array().toString());
 
             try { Thread.sleep(100); }
             catch (InterruptedException e) { }
         }
 
         if ( _stopWaitThread )
-            appendMessage("wait thread stopping!");
+            appendMessageOnUIThread("wait thread stopping!");
     }
 }
