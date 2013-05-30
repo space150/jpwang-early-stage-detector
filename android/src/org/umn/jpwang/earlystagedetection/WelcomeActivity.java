@@ -1,8 +1,12 @@
 package org.umn.jpwang.earlystagedetection;
 
 import android.app.Activity;
+import android.content.Context;
 import android.content.Intent;
+import android.hardware.usb.UsbManager;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.SystemClock;
 import android.util.Log;
 import android.view.Menu;
 import android.view.MenuInflater;
@@ -12,7 +16,17 @@ import android.widget.Button;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
-public class WelcomeActivity extends Activity implements ConnectionManagerDelegate
+import java.io.IOException;
+import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+import com.hoho.android.usbserial.driver.UsbSerialDriver;
+import com.hoho.android.usbserial.driver.UsbSerialProber;
+import com.hoho.android.usbserial.util.HexDump;
+import com.hoho.android.usbserial.util.SerialInputOutputManager;
+
+public class WelcomeActivity extends Activity
 {
     private static final String TAG = "EarlyStageDetection::WelcomeActivity";
 
@@ -22,8 +36,31 @@ public class WelcomeActivity extends Activity implements ConnectionManagerDelega
 
     private Button _startButton;
 
-    private ConnectionManager _connectionManager;
+    private UsbManager _usbManager;
+    private UsbSerialDriver _driver;
 
+    private final ExecutorService _executor = Executors.newSingleThreadExecutor();
+    private SerialInputOutputManager _serialIoManager;
+    private final SerialInputOutputManager.Listener _serialListener = new SerialInputOutputManager.Listener()
+    {
+        @Override
+        public void onRunError(Exception e)
+        {
+            Log.d(TAG, "Runner stopped.");
+        }
+
+        @Override
+        public void onNewData(final byte[] data)
+        {
+            WelcomeActivity.this.runOnUiThread(new Runnable()
+            {
+                @Override
+                public void run() {
+                    WelcomeActivity.this.updateReceivedData(data);
+                }
+            });
+        }
+    };
 
     @Override
     public void onCreate(Bundle savedInstanceState)
@@ -37,14 +74,37 @@ public class WelcomeActivity extends Activity implements ConnectionManagerDelega
             @Override
             public void onClick(View view)
             {
-                _connectionManager.startProtocol();
+                Thread thread = new Thread()
+                {
+                    @Override
+                    public void run() {
+                        try
+                        {
+                            Packet configPacket = new Packet(Packet.Type.Config);
+                            int numBytesWritten = _driver.write(configPacket.getBuffer(), 1000);
+                            message("wrote config packet, " + numBytesWritten + " bytes...");
+
+                            SystemClock.sleep(2000);
+
+                            Packet startPacket = new Packet(Packet.Type.Start);
+                            numBytesWritten = _driver.write(startPacket.getBuffer(), 1000);
+                            message("wrote start packet, " + numBytesWritten + " bytes...");
+                        }
+                        catch (IOException e)
+                        {
+                            message("failed to write packets: " + e.getMessage());
+                        }
+                    }
+                };
+                thread.start();
             }
         });
+        _startButton.setEnabled(false);
 
         _outputView = (TextView)findViewById(R.id.output_view);
         _outputScrollView = (ScrollView)findViewById(R.id.output_scrollview);
 
-        _connectionManager = new ConnectionManager(this, this);
+        _usbManager = (UsbManager)getSystemService(Context.USB_SERVICE);
     }
 
     @Override
@@ -52,15 +112,72 @@ public class WelcomeActivity extends Activity implements ConnectionManagerDelega
     {
         super.onResume();
 
-        _connectionManager.findDevices();
+        if ( _driver == null )
+        {
+        List<UsbSerialDriver> drivers = UsbSerialProber.findAllDevices(_usbManager);
+        if ( drivers.size() > 0 )
+        {
+            _driver = drivers.get(0);
+            message("Found " + drivers.size() + " compatible drivers, using the first one: " + _driver);
+        }
+        else
+            message("No compatible drivers found!");
+        }
+
+        Log.d(TAG, "Resumed, sDriver=" + _driver);
+        if ( _driver == null )
+        {
+            message("No serial device.");
+        }
+        else
+        {
+            try
+            {
+                _driver.open();
+                _driver.setParameters(115200, 8, UsbSerialDriver.STOPBITS_1, UsbSerialDriver.PARITY_NONE);
+            }
+            catch (IOException e)
+            {
+                message("Error opening device: " + e.getMessage());
+                try
+                {
+                    _driver.close();
+                }
+                catch (IOException e2)
+                {
+                    // Ignore.
+                }
+                _driver = null;
+                return;
+            }
+            message("Serial device: " + _driver.getClass().getSimpleName());
+        }
+
+        onDeviceStateChange();
+    }
+
+    @Override
+    protected void onPause()
+    {
+        super.onPause();
+        stopIoManager();
+
+        if ( _driver != null )
+        {
+            try {
+                _driver.close();
+            } catch (IOException e) {
+                // Ignore.
+            }
+            _driver = null;
+        }
+        finish();
     }
 
     @Override
     public void onDestroy()
     {
         super.onDestroy();
-
-        _connectionManager.destroy();
     }
 
     @Override
@@ -95,33 +212,51 @@ public class WelcomeActivity extends Activity implements ConnectionManagerDelega
         startActivity(Intent.createChooser(i, "Email Log with:"));
     }
 
-    @Override
-    public void connected(boolean success)
+    public void message(final String message)
     {
-        Log.d(TAG, "connected, enabling start button");
-        _startButton.setEnabled(success);
-    }
-
-    @Override
-    public void disconnected()
-    {
-        Log.d(TAG, "disconnected, disabling start button");
-        _startButton.setEnabled(false);
-    }
-
-    @Override
-    public void message(String message)
-    {
-        final String m = message;
+        Log.d(TAG, message);
         runOnUiThread(new Runnable()
         {
             @Override
             public void run()
             {
-                _outputString += m + "\n";
+                _outputString += message + "\n";
                 _outputView.setText(_outputString);
                 _outputScrollView.fullScroll(ScrollView.FOCUS_DOWN);
             }
         });
+    }
+
+    private void stopIoManager()
+    {
+        if ( _serialIoManager != null )
+        {
+            Log.i(TAG, "Stopping io manager ..");
+            _serialIoManager.stop();
+            _serialIoManager = null;
+        }
+    }
+
+    private void startIoManager()
+    {
+        if ( _driver != null )
+        {
+            Log.i(TAG, "Starting io manager ..");
+            _serialIoManager = new SerialInputOutputManager(_driver, _serialListener);
+            _executor.submit(_serialIoManager);
+        }
+    }
+
+    private void onDeviceStateChange()
+    {
+        stopIoManager();
+        startIoManager();
+
+        _startButton.setEnabled(_driver != null);
+    }
+
+    private void updateReceivedData(byte[] data)
+    {
+        message("Read " + data.length + " bytes: " + HexDump.toHexString(data));
     }
 }
